@@ -2,12 +2,16 @@
 name = "emv-3ds"
 version = "0.1.0"
 edition = "2021"
-description = "EMV 3-D Secure 2.x protocol — message types, state machine, and transaction lifecycle"
+description = "EMV 3-D Secure 2.x (3DS2) protocol — AReq/ARes/CReq/CRes messages, transaction state machine, ECI/CAVV helpers, and full EMVCo spec serialization for payment authentication (SCA/PSD2)"
 license = "MIT"
 repository = "https://github.com/zuub-don/emv-3ds"
-keywords = ["emv", "3ds", "3d-secure", "payments", "authentication"]
-categories = ["web-programming"]
+homepage = "https://github.com/zuub-don/emv-3ds"
+documentation = "https://docs.rs/emv-3ds"
+readme = "README.md"
+keywords = ["emv", "3ds", "payments", "authentication", "pci"]
+categories = ["web-programming", "encoding", "data-structures"]
 rust-version = "1.75"
+exclude = ["mutants.out*", ".githooks", "scripts"]
 
 [dependencies]
 serde      = { version = "1", features = ["derive"] }
