@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Pre-push: mutation testing — zero survivors required before a push is accepted.
+# Skip with: SKIP_MUTANTS=1 git push
+set -euo pipefail
+
+if [[ "${SKIP_MUTANTS:-0}" == "1" ]]; then
+    echo "[hook] mutation testing skipped (SKIP_MUTANTS=1)."
+    exit 0
+fi
+
+ROOT="$(git rev-parse --show-toplevel)"
+
+echo "[hook] cargo mutants (this takes ~2-3 min)..."
+cargo mutants \
+    --manifest-path "$ROOT/Cargo.toml" \
+    --no-shuffle \
+    --jobs 4
+
+echo "[hook] pre-push passed — 0 survivors."

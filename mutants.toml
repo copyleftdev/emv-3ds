@@ -1,0 +1,12 @@
+# cargo-mutants configuration
+# Docs: https://mutants.rs/configuration.html
+
+# Give each mutant 2× the baseline test time before declaring a timeout.
+timeout_multiplier = 2.0
+
+# Run 4 mutants in parallel (tune to CPU count).
+jobs = 4
+
+# Exclude trivial/generated display and error-chain boilerplate that cannot
+# carry domain logic mutations (the fmt/from impls are fully driven by serde).
+exclude_globs = []
