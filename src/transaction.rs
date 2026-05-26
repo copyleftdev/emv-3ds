@@ -1,7 +1,7 @@
 use crate::error::{Error, Result};
 use crate::message::{
     AuthenticationRequest, AuthenticationResponse, ChallengeRequest, ChallengeResponse,
-    ErrorMessage,
+    ErrorMessage, ResultsRequest,
 };
 use crate::types::{Eci, TransStatus};
 
@@ -18,13 +18,20 @@ use crate::types::{Eci, TransStatus};
 ///    │  receive_ares()
 ///    ├─(Y/A)──────────────────────► Authenticated
 ///    ├─(N/U/R)────────────────────► NotAuthenticated
-///    └─(C/D)
+///    ├─(C)
+///    │    │
+///    │    ▼
+///    │  AwaitingCRes
+///    │    │  receive_cres()
+///    │    ├─(Y/A)────────────────► Authenticated
+///    │    └─(N/U)────────────────► NotAuthenticated
+///    └─(D)
 ///         │
 ///         ▼
-///       AwaitingCRes
-///         │  receive_cres()
+///       AwaitingRReq
+///         │  receive_rreq()
 ///         ├─(Y/A)──────────────────► Authenticated
-///         └─(N/U)──────────────────► NotAuthenticated
+///         └─(N/U/R)────────────────► NotAuthenticated
 ///
 ///  Any state + receive_error() ──► Failed
 /// ```
@@ -34,12 +41,18 @@ pub enum TransactionState {
     Created { areq: Box<AuthenticationRequest> },
     /// AReq sent; waiting for the ARes from the DS.
     AwaitingARes { three_ds_server_trans_id: String },
-    /// ARes received with transStatus=C or D; challenge must be presented.
+    /// ARes received with transStatus=C; challenge must be presented.
     AwaitingCRes {
         three_ds_server_trans_id: String,
         acs_trans_id: String,
         /// ACS URL to redirect/embed (browser channel), or None for app/decoupled.
         acs_url: Option<String>,
+    },
+    /// ARes received with transStatus=D; waiting for the ACS to send an RReq
+    /// after completing decoupled out-of-band authentication.
+    AwaitingRReq {
+        three_ds_server_trans_id: String,
+        acs_trans_id: String,
     },
     /// Authentication completed successfully (frictionless Y/A or challenge Y).
     Authenticated {
@@ -112,10 +125,14 @@ impl TransactionState {
                 eci: ares.eci,
                 authentication_value: ares.authentication_value,
             },
-            TransStatus::ChallengeRequired | TransStatus::DecoupledRequired => Self::AwaitingCRes {
+            TransStatus::ChallengeRequired => Self::AwaitingCRes {
                 three_ds_server_trans_id,
                 acs_trans_id: ares.acs_trans_id,
                 acs_url: ares.acs_url,
+            },
+            TransStatus::DecoupledRequired => Self::AwaitingRReq {
+                three_ds_server_trans_id,
+                acs_trans_id: ares.acs_trans_id,
             },
             status => Self::NotAuthenticated {
                 three_ds_server_trans_id,
@@ -191,6 +208,46 @@ impl TransactionState {
         Ok(next)
     }
 
+    /// Process an incoming RReq and advance to a terminal state.
+    /// The caller must send `ResultsResponse::acknowledge(&rreq)` to the ACS.
+    pub fn receive_rreq(self, rreq: ResultsRequest) -> Result<Self> {
+        let Self::AwaitingRReq {
+            three_ds_server_trans_id,
+            acs_trans_id,
+        } = self
+        else {
+            return Err(Error::InvalidTransition {
+                from: self.name().to_owned(),
+                to: "post-RReq".to_owned(),
+            });
+        };
+
+        if rreq.three_ds_server_trans_id != three_ds_server_trans_id {
+            return Err(Error::InvalidField {
+                field: "threeDSServerTransID",
+                reason: "RReq trans ID does not match AReq".to_owned(),
+            });
+        }
+
+        let next = if rreq.trans_status.is_authenticated() {
+            Self::Authenticated {
+                three_ds_server_trans_id,
+                acs_trans_id,
+                ds_trans_id: rreq.ds_trans_id,
+                eci: rreq.eci,
+                authentication_value: rreq.authentication_value,
+            }
+        } else {
+            Self::NotAuthenticated {
+                three_ds_server_trans_id,
+                trans_status: rreq.trans_status,
+                reason_code: rreq.trans_status_reason.map(|r| format!("{r:?}")),
+            }
+        };
+
+        Ok(next)
+    }
+
     /// Handle a protocol error; always transitions to `Failed`.
     pub fn receive_error(self, err: &ErrorMessage) -> Self {
         Self::Failed {
@@ -214,6 +271,7 @@ impl TransactionState {
             Self::Created { .. } => "Created",
             Self::AwaitingARes { .. } => "AwaitingARes",
             Self::AwaitingCRes { .. } => "AwaitingCRes",
+            Self::AwaitingRReq { .. } => "AwaitingRReq",
             Self::Authenticated { .. } => "Authenticated",
             Self::NotAuthenticated { .. } => "NotAuthenticated",
             Self::Failed { .. } => "Failed",

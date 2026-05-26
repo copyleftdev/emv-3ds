@@ -32,35 +32,48 @@ The protocol involves three parties:
 | Directory Server | DS | Card-scheme routing layer (Visa, Mastercard) |
 | Access Control Server | ACS | Issuer-side component; authenticates cardholder |
 
-A transaction follows one of two paths:
+A frictionless or challenge transaction:
 
 ```
 Frictionless:  3DSS ──AReq──► DS ──► ACS ──ARes(Y/A)──► 3DSS
 Challenge:     3DSS ──AReq──► DS ──► ACS ──ARes(C)───► 3DSS
                         browser ──CReq──► ACS ──CRes(Y/N)──► 3DSS
+Decoupled:     3DSS ──AReq──► DS ──► ACS ──ARes(D)───► 3DSS
+                        ACS ──RReq──► 3DSS ──RRes──► ACS
+```
+
+DS preparation (card range negotiation):
+
+```
+3DSS ──PReq──► DS ──PRes(card ranges + threeDSMethodURL)──► 3DSS
 ```
 
 ---
 
 ## Features
 
-- **All five protocol messages** — `AReq`, `ARes`, `CReq`, `CRes`, `Erro` with
-  every field from the EMVCo 3DS Core Specification 2.3.
+- **All nine protocol messages** — `AReq`, `ARes`, `CReq`, `CRes`, `Erro`, `PReq`, `PRes`,
+  `RReq`, `RRes` with every field from the EMVCo 3DS Core Specification 2.3.
 - **Correct wire format** — `#[serde(rename)]` for every acronym field
-  (`threeDSServerTransID`, `acsTransID`, `dsTransID`, `acsURL`) that
+  (`threeDSServerTransID`, `acsTransID`, `dsTransID`, `acsURL`, `threeDSMethodURL`) that
   `rename_all = "camelCase"` would mangle.
 - **Transaction state machine** — type-safe lifecycle from `Created` through
-  `AwaitingARes` → `AwaitingCRes` → `Authenticated` / `NotAuthenticated` / `Failed`,
+  `AwaitingARes` → `AwaitingCRes` / `AwaitingRReq` → `Authenticated` / `NotAuthenticated` / `Failed`,
   with invalid-transition errors.
+- **Card range negotiation** — `PreparationResponse::range_for_pan()` to look up the
+  card range entry (including `threeDSMethodURL`) for a given PAN prefix.
+- **Decoupled authentication** — `AwaitingRReq` state, `receive_rreq()` transition, and
+  `ResultsResponse::acknowledge()` builder for the ACS callback flow.
 - **Coded value enums** — `TransStatus`, `Eci`, `ChallengeIndicator`,
-  `MessageVersion`, `TransStatusReason` (21 codes), and all other spec enumerations.
+  `MessageVersion`, `TransStatusReason` (21 codes), `ActionIndicator`, `AcsAuthMethod`,
+  `AuthenticationType`, `ResultsStatus`, and all other spec enumerations.
 - **ECI / liability shift helpers** — `Eci::has_liability_shift()`,
   `TransStatus::is_authenticated()`, `AuthenticationResponse::requires_challenge()`.
 - **ISO 4217 currency** — `Currency` newtype with zero-padded spec string,
   `Amount` with `spec_amount` / `spec_currency` / `spec_exponent` EMVCo field getters.
 - **Message envelope** — `Message` enum with `from_json` / `to_json` that peeks at
   `messageType` for dispatch without duplicating the field on the wire.
-- **Quality-gated** — 47 tests (unit + integration + proptest), 0 `cargo-mutants`
+- **Quality-gated** — 60 tests (unit + integration + proptest), 0 `cargo-mutants`
   survivors, `clippy -D warnings` clean.
 
 ---
@@ -69,7 +82,7 @@ Challenge:     3DSS ──AReq──► DS ──► ACS ──ARes(C)───�
 
 ```toml
 [dependencies]
-emv-3ds = "0.1"
+emv-3ds = "0.2"
 ```
 
 ### Build and send an AReq
@@ -120,9 +133,12 @@ match &state {
         // Frictionless success — attach ECI + CAVV to auth request
     }
     TransactionState::AwaitingCRes { acs_url, .. } => {
-        // Redirect browser to acs_url for challenge
+        // Challenge flow — redirect browser to acs_url
         let creq = state.build_creq(Some(ChallengeWindowSize::W500x600))?;
         // POST serde_json::to_string(&creq) to acs_url
+    }
+    TransactionState::AwaitingRReq { .. } => {
+        // Decoupled flow — ACS will POST an RReq back to your server
     }
     TransactionState::NotAuthenticated { .. } => {
         // Decline or soft-decline
@@ -130,9 +146,37 @@ match &state {
     _ => {}
 }
 
-// 4. After challenge: receive CRes
+// 4a. After browser challenge: receive CRes
 let cres: emv_3ds::message::ChallengeResponse = serde_json::from_str(&acs_response)?;
 let state = state.receive_cres(cres)?;
+
+// 4b. After decoupled challenge: receive RReq, send back RRes
+let rreq: emv_3ds::message::ResultsRequest = serde_json::from_str(&acs_callback)?;
+let (state, rres) = state.receive_rreq(rreq)?;
+// POST serde_json::to_string(&rres) back to the ACS
+```
+
+### Negotiate card ranges with PReq/PRes
+
+```rust
+use emv_3ds::message::preq::{PreparationRequest, MessageType as PReqType};
+use emv_3ds::types::MessageVersion;
+
+let preq = PreparationRequest {
+    message_type: PReqType::PReq,
+    message_version: MessageVersion::V220,
+    three_ds_server_trans_id: uuid::Uuid::new_v4().to_string(),
+    ..Default::default()
+};
+
+// POST to DS, receive PRes
+let pres: emv_3ds::message::PreparationResponse = serde_json::from_str(&ds_response)?;
+
+// Look up the card range for a PAN
+if let Some(range) = pres.range_for_pan("411111") {
+    let method_url = range.three_ds_method_url.as_deref();
+    // Use method_url to invoke the 3DS Method before AReq
+}
 ```
 
 ### Parse any incoming message
@@ -143,6 +187,7 @@ use emv_3ds::message::Message;
 let msg = Message::from_json(&raw_json)?;
 match msg {
     Message::ARes(ares) => { /* handle */ }
+    Message::RReq(rreq) => { /* decoupled callback */ }
     Message::Erro(err)  => { /* abort transaction */ }
     _ => {}
 }
@@ -159,6 +204,10 @@ match msg {
 | `ChallengeRequest` | `CReq` | Browser/SDK → ACS | Submit challenge data |
 | `ChallengeResponse` | `CRes` | ACS → 3DSS | Challenge outcome |
 | `ErrorMessage` | `Erro` | Any → Any | Protocol error |
+| `PreparationRequest` | `PReq` | 3DSS → DS | Request card range data |
+| `PreparationResponse` | `PRes` | DS → 3DSS | Card ranges + threeDSMethodURL |
+| `ResultsRequest` | `RReq` | ACS → 3DSS | Decoupled/app auth results |
+| `ResultsResponse` | `RRes` | 3DSS → ACS | Acknowledge results receipt |
 
 ---
 
@@ -170,15 +219,16 @@ Created
   ▼
 AwaitingARes
   │  receive_ares()
-  ├─ Y/A ──────────────────────► Authenticated  (terminal)
-  ├─ N/U/I/R ──────────────────► NotAuthenticated  (terminal)
-  └─ C/D
-       │
-       ▼
-     AwaitingCRes
-       │  receive_cres()
-       ├─ Y ────────────────────► Authenticated  (terminal)
-       └─ N/U ──────────────────► NotAuthenticated  (terminal)
+  ├─ Y/A ──────────────────────► Authenticated      (terminal)
+  ├─ N/U/I/R ──────────────────► NotAuthenticated   (terminal)
+  ├─ C ────────────────────────► AwaitingCRes
+  │                                │  receive_cres()
+  │                                ├─ Y ──────────► Authenticated      (terminal)
+  │                                └─ N/U ────────► NotAuthenticated   (terminal)
+  └─ D ────────────────────────► AwaitingRReq
+                                   │  receive_rreq()
+                                   ├─ Y ──────────► Authenticated      (terminal)
+                                   └─ N/U ────────► NotAuthenticated   (terminal)
 
 Any state + receive_error() ──► Failed  (terminal)
 ```
@@ -200,8 +250,11 @@ Any state + receive_error() ──► Failed  (terminal)
 
 ## Roadmap
 
-- [ ] **PReq / PRes** — Directory Server preparation request (card range negotiation)
-- [ ] **RReq / RRes** — Results request for decoupled and app-based authentication
+- [x] **AReq / ARes** — Core authentication messages
+- [x] **CReq / CRes** — Browser/SDK challenge messages
+- [x] **Erro** — Protocol error message
+- [x] **PReq / PRes** — Directory Server preparation request (card range negotiation)
+- [x] **RReq / RRes** — Results request for decoupled and app-based authentication
 - [ ] **JWE envelope** — EMVCo-mandated end-to-end encryption for `acctNumber` and
   `sdkEncData` fields
 - [ ] **DS certificate management** — JWK / PKCS#12 signing for AReq integrity

@@ -1,6 +1,6 @@
 [package]
 name = "emv-3ds"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "EMV 3-D Secure 2.x (3DS2) protocol — AReq/ARes/CReq/CRes messages, transaction state machine, ECI/CAVV helpers, and full EMVCo spec serialization for payment authentication (SCA/PSD2)"
 license = "MIT"

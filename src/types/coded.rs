@@ -307,3 +307,69 @@ pub enum SuspiciousAccActivity {
     #[serde(rename = "02")]
     SuspiciousActivityObserved,
 }
+
+/// Card range update action in a PRes payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ActionIndicator {
+    #[serde(rename = "A")]
+    Add,
+    #[serde(rename = "M")]
+    Modify,
+    #[serde(rename = "D")]
+    Delete,
+}
+
+/// Authentication method used by the ACS (reported in RReq).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AcsAuthMethod {
+    #[serde(rename = "01")]
+    NoAuthentication,
+    #[serde(rename = "02")]
+    SmsOtp,
+    #[serde(rename = "03")]
+    KnowledgeBased,
+    #[serde(rename = "04")]
+    Oob,
+    #[serde(rename = "05")]
+    Cvc2,
+    #[serde(rename = "06")]
+    ThreeDsServerProprietary,
+    #[serde(rename = "07")]
+    RiskBased,
+    #[serde(rename = "08")]
+    DigitalToken,
+    #[serde(rename = "09")]
+    PushNotification,
+    #[serde(rename = "10")]
+    Biometric,
+    #[serde(rename = "11")]
+    FidoAssertion,
+    #[serde(rename = "12")]
+    AppBased,
+}
+
+/// Type of authentication performed by the ACS (reported in RReq).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum AuthenticationType {
+    #[serde(rename = "01")]
+    Frictionless,
+    #[serde(rename = "02")]
+    ChallengeOtp,
+    #[serde(rename = "03")]
+    ChallengeOob,
+    #[serde(rename = "04")]
+    ChallengeRba,
+    #[serde(rename = "05")]
+    ChallengeAcsDecision,
+}
+
+/// Acknowledgment status in RRes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum ResultsStatus {
+    /// Request received and all required data present.
+    #[serde(rename = "01")]
+    Received,
+    /// Out-of-sync data received; requestor should retry.
+    #[serde(rename = "02")]
+    OutOfSync,
+}

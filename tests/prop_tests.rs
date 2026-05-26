@@ -4,8 +4,8 @@ use emv_3ds::message::{
 };
 use emv_3ds::transaction::TransactionState;
 use emv_3ds::types::{
-    Amount, ChallengeWindowSize, Currency, DeviceChannel, Eci, MessageCategory, MessageVersion,
-    TransStatus,
+    ActionIndicator, Amount, ChallengeWindowSize, Currency, DeviceChannel, Eci, MessageCategory,
+    MessageVersion, ResultsStatus, TransStatus,
 };
 use proptest::prelude::*;
 
@@ -29,10 +29,7 @@ fn arb_auth_status() -> impl Strategy<Value = TransStatus> {
 }
 
 fn arb_challenge_status() -> impl Strategy<Value = TransStatus> {
-    prop_oneof![
-        Just(TransStatus::ChallengeRequired),
-        Just(TransStatus::DecoupledRequired),
-    ]
+    Just(TransStatus::ChallengeRequired)
 }
 
 fn arb_non_auth_non_challenge_status() -> impl Strategy<Value = TransStatus> {
@@ -85,6 +82,21 @@ fn arb_window_size() -> impl Strategy<Value = ChallengeWindowSize> {
         Just(ChallengeWindowSize::W500x600),
         Just(ChallengeWindowSize::W600x400),
         Just(ChallengeWindowSize::FullScreen),
+    ]
+}
+
+fn arb_action_indicator() -> impl Strategy<Value = ActionIndicator> {
+    prop_oneof![
+        Just(ActionIndicator::Add),
+        Just(ActionIndicator::Modify),
+        Just(ActionIndicator::Delete),
+    ]
+}
+
+fn arb_results_status() -> impl Strategy<Value = ResultsStatus> {
+    prop_oneof![
+        Just(ResultsStatus::Received),
+        Just(ResultsStatus::OutOfSync)
     ]
 }
 
@@ -185,6 +197,27 @@ fn make_failed_cres() -> ChallengeResponse {
         acs_ui_type: None,
         acs_html: None,
         whitelist_status: None,
+    }
+}
+
+fn make_rreq(trans_id: &str, status: TransStatus) -> emv_3ds::message::ResultsRequest {
+    emv_3ds::message::ResultsRequest {
+        message_type: emv_3ds::message::rreq::MessageType::RReq,
+        message_version: MessageVersion::V220,
+        three_ds_server_trans_id: trans_id.to_owned(),
+        acs_trans_id: "acs-prop".to_owned(),
+        ds_trans_id: None,
+        sdk_trans_id: None,
+        message_category: MessageCategory::PaymentAuthentication,
+        trans_status: status,
+        trans_status_reason: None,
+        authentication_method: None,
+        authentication_type: None,
+        authentication_value: None,
+        eci: None,
+        interaction_counter: None,
+        acs_rendering_type: None,
+        message_extension: None,
     }
 }
 
@@ -443,6 +476,18 @@ fn is_terminal_for_each_state() {
         "AwaitingCRes must not be terminal"
     );
 
+    // After the AwaitingCRes check, add:
+    let rreq_wait = TransactionState::new(minimal_areq())
+        .areq_sent()
+        .unwrap()
+        .0
+        .receive_ares(make_ares(TransStatus::DecoupledRequired))
+        .unwrap();
+    assert!(
+        !rreq_wait.is_terminal(),
+        "AwaitingRReq must not be terminal"
+    );
+
     let auth = TransactionState::new(minimal_areq())
         .areq_sent()
         .unwrap()
@@ -494,4 +539,132 @@ fn invalid_transition_error_names_current_state() {
         }
         other => panic!("expected InvalidTransition, got {other:?}"),
     }
+}
+
+// ── New enum serde roundtrips ─────────────────────────────────────────────────
+
+proptest! {
+    #[test]
+    fn action_indicator_serde_roundtrip(a in arb_action_indicator()) {
+        let json = serde_json::to_string(&a).unwrap();
+        let back: ActionIndicator = serde_json::from_str(&json).unwrap();
+        prop_assert_eq!(a, back);
+    }
+
+    #[test]
+    fn results_status_serde_roundtrip(s in arb_results_status()) {
+        let json = serde_json::to_string(&s).unwrap();
+        let back: ResultsStatus = serde_json::from_str(&json).unwrap();
+        prop_assert_eq!(s, back);
+    }
+
+    /// Kills: DecoupledRequired routing mutation in receive_ares.
+    #[test]
+    fn ares_decoupled_gives_awaiting_rreq(_u in Just(())) {
+        let state = TransactionState::new(minimal_areq());
+        let (state, _) = state.areq_sent().unwrap();
+        let next = state
+            .receive_ares(make_ares(TransStatus::DecoupledRequired))
+            .unwrap();
+        let is_rreq = matches!(next, TransactionState::AwaitingRReq { .. });
+        prop_assert!(is_rreq);
+        prop_assert!(!next.is_terminal());
+    }
+
+    /// Kills: receive_rreq auth routing mutations.
+    #[test]
+    fn rreq_auth_status_gives_authenticated(status in arb_auth_status()) {
+        let state = TransactionState::new(minimal_areq());
+        let (state, _) = state.areq_sent().unwrap();
+        let state = state
+            .receive_ares(make_ares(TransStatus::DecoupledRequired))
+            .unwrap();
+        let next = state.receive_rreq(make_rreq("txn-prop", status)).unwrap();
+        let is_auth = matches!(next, TransactionState::Authenticated { .. });
+        prop_assert!(is_auth);
+        prop_assert!(next.is_terminal());
+    }
+
+    /// Kills: receive_rreq failure routing mutations.
+    #[test]
+    fn rreq_failure_status_gives_not_authenticated(
+        status in arb_non_auth_non_challenge_status(),
+    ) {
+        let state = TransactionState::new(minimal_areq());
+        let (state, _) = state.areq_sent().unwrap();
+        let state = state
+            .receive_ares(make_ares(TransStatus::DecoupledRequired))
+            .unwrap();
+        let next = state.receive_rreq(make_rreq("txn-prop", status)).unwrap();
+        let is_not_auth = matches!(next, TransactionState::NotAuthenticated { .. });
+        prop_assert!(is_not_auth);
+        prop_assert!(next.is_terminal());
+    }
+}
+
+// ── RReq: invalid transition and trans ID mismatch ────────────────────────────
+
+#[test]
+fn rreq_trans_id_mismatch_is_error() {
+    let state = TransactionState::new(minimal_areq());
+    let (state, _) = state.areq_sent().unwrap();
+    let state = state
+        .receive_ares(make_ares(TransStatus::DecoupledRequired))
+        .unwrap();
+    let result = state.receive_rreq(make_rreq("wrong-id", TransStatus::Success));
+    assert!(result.is_err());
+}
+
+#[test]
+fn rreq_invalid_transition_from_awaiting_ares() {
+    let state = TransactionState::new(minimal_areq());
+    let (awaiting, _) = state.areq_sent().unwrap();
+    let result = awaiting.receive_rreq(make_rreq("txn-prop", TransStatus::Success));
+    assert!(result.is_err());
+}
+
+/// Kills: ResultsResponse::acknowledge results_status mutation.
+#[test]
+fn rres_acknowledge_status_is_received() {
+    let rreq = make_rreq("txn-prop", TransStatus::Success);
+    let rres = emv_3ds::message::ResultsResponse::acknowledge(&rreq);
+    assert_eq!(rres.results_status, ResultsStatus::Received);
+    assert_eq!(rres.three_ds_server_trans_id, "txn-prop");
+}
+
+/// Kills: range_for_pan find logic.
+#[test]
+fn range_for_pan_finds_correct_range() {
+    use emv_3ds::message::{pres, CardRangeData, PreparationResponse};
+    use emv_3ds::types::ActionIndicator;
+
+    let pres = PreparationResponse {
+        message_type: pres::MessageType::PRes,
+        message_version: MessageVersion::V220,
+        three_ds_server_trans_id: "prep-001".to_owned(),
+        ds_trans_id: None,
+        serial_num: None,
+        ds_reference_number: None,
+        ds_start_protocol_version: "2.1.0".to_owned(),
+        ds_end_protocol_version: "2.2.0".to_owned(),
+        card_range_data: vec![CardRangeData {
+            start_range: "4000000000000000".to_owned(),
+            end_range: "4999999999999999".to_owned(),
+            action_ind: ActionIndicator::Add,
+            acs_start_protocol_version: "2.1.0".to_owned(),
+            acs_end_protocol_version: "2.2.0".to_owned(),
+            three_ds_method_url: None,
+            ds_start_protocol_version: None,
+            ds_end_protocol_version: None,
+            ds_trans_id: None,
+            acs_info_ind: None,
+        }],
+    };
+
+    assert!(pres.range_for_pan("4111111111111111").is_some());
+    assert!(pres.range_for_pan("5200000000000000").is_none());
+    assert_eq!(
+        pres.range_for_pan("4000000000000000").unwrap().start_range,
+        "4000000000000000"
+    );
 }

@@ -3,7 +3,8 @@ use emv_3ds::message::{
     ErrorMessage,
 };
 use emv_3ds::types::{
-    ChallengeWindowSize, DeviceChannel, Eci, MessageCategory, MessageVersion, TransStatus,
+    AcsAuthMethod, ActionIndicator, AuthenticationType, ChallengeWindowSize, DeviceChannel, Eci,
+    MessageCategory, MessageVersion, ResultsStatus, TransStatus,
 };
 
 // ── AReq roundtrip ────────────────────────────────────────────────────────────
@@ -234,4 +235,138 @@ fn amount_spec_fields() {
     assert_eq!(amount.spec_amount(), "5000");
     assert_eq!(amount.spec_currency(), "826");
     assert_eq!(amount.spec_exponent(), "2");
+}
+
+// ── PReq roundtrip ────────────────────────────────────────────────────────────
+
+#[test]
+fn preq_serializes_correctly() {
+    let preq = emv_3ds::message::PreparationRequest {
+        message_type: emv_3ds::message::preq::MessageType::PReq,
+        message_version: MessageVersion::V220,
+        three_ds_server_trans_id: "prep-txn-001".to_owned(),
+        ds_trans_id: None,
+        serial_num: Some("00001".to_owned()),
+        three_ds_server_ref_number: None,
+    };
+    let json = serde_json::to_string(&preq).unwrap();
+    assert!(json.contains("\"messageType\":\"PReq\""));
+    assert!(json.contains("\"threeDSServerTransID\":\"prep-txn-001\""));
+    assert!(json.contains("\"serialNum\":\"00001\""));
+    assert!(!json.contains("dsTransID"));
+
+    let decoded: emv_3ds::message::PreparationRequest = serde_json::from_str(&json).unwrap();
+    assert_eq!(
+        decoded.three_ds_server_trans_id,
+        preq.three_ds_server_trans_id
+    );
+    assert_eq!(decoded.serial_num, Some("00001".to_owned()));
+}
+
+// ── PRes roundtrip ────────────────────────────────────────────────────────────
+
+#[test]
+fn pres_roundtrip_with_card_ranges() {
+    let json = r#"{
+        "messageType": "PRes",
+        "messageVersion": "2.2.0",
+        "threeDSServerTransID": "prep-txn-001",
+        "dsStartProtocolVersion": "2.1.0",
+        "dsEndProtocolVersion": "2.2.0",
+        "serialNum": "00002",
+        "cardRangeData": [
+            {
+                "startRange": "4000000000000000",
+                "endRange":   "4999999999999999",
+                "actionInd":  "A",
+                "acsStartProtocolVersion": "2.1.0",
+                "acsEndProtocolVersion":   "2.2.0",
+                "threeDSMethodURL": "https://acs.bank.example.com/3ds/method"
+            }
+        ]
+    }"#;
+
+    let pres: emv_3ds::message::PreparationResponse = serde_json::from_str(json).unwrap();
+    assert_eq!(pres.card_range_data.len(), 1);
+    assert_eq!(pres.card_range_data[0].action_ind, ActionIndicator::Add);
+    assert_eq!(
+        pres.card_range_data[0].three_ds_method_url.as_deref(),
+        Some("https://acs.bank.example.com/3ds/method")
+    );
+    assert!(pres.range_for_pan("4111111111111111").is_some());
+    assert!(pres.range_for_pan("5111111111111111").is_none());
+
+    let re_json = serde_json::to_string(&pres).unwrap();
+    let re_pres: emv_3ds::message::PreparationResponse = serde_json::from_str(&re_json).unwrap();
+    assert_eq!(re_pres.serial_num, pres.serial_num);
+}
+
+// ── RReq roundtrip ────────────────────────────────────────────────────────────
+
+#[test]
+fn rreq_roundtrip() {
+    let json = r#"{
+        "messageType": "RReq",
+        "messageVersion": "2.2.0",
+        "threeDSServerTransID": "txn-001",
+        "acsTransID": "acs-001",
+        "dsTransID": "ds-001",
+        "messageCategory": "01",
+        "transStatus": "Y",
+        "authenticationMethod": "02",
+        "authenticationType": "01",
+        "authenticationValue": "dGVzdA==",
+        "eci": "05",
+        "interactionCounter": "01"
+    }"#;
+
+    let rreq: emv_3ds::message::ResultsRequest = serde_json::from_str(json).unwrap();
+    assert_eq!(rreq.trans_status, TransStatus::Success);
+    assert_eq!(rreq.eci, Some(Eci::VisaFullyAuthenticated));
+    assert_eq!(rreq.authentication_method, Some(AcsAuthMethod::SmsOtp));
+    assert_eq!(
+        rreq.authentication_type,
+        Some(AuthenticationType::Frictionless)
+    );
+
+    let re_json = serde_json::to_string(&rreq).unwrap();
+    let re_rreq: emv_3ds::message::ResultsRequest = serde_json::from_str(&re_json).unwrap();
+    assert_eq!(re_rreq.authentication_value, rreq.authentication_value);
+}
+
+// ── RRes roundtrip + acknowledge builder ─────────────────────────────────────
+
+#[test]
+fn rres_acknowledge_and_roundtrip() {
+    let rreq = emv_3ds::message::ResultsRequest {
+        message_type: emv_3ds::message::rreq::MessageType::RReq,
+        message_version: MessageVersion::V220,
+        three_ds_server_trans_id: "txn-001".to_owned(),
+        acs_trans_id: "acs-001".to_owned(),
+        ds_trans_id: Some("ds-001".to_owned()),
+        sdk_trans_id: None,
+        message_category: MessageCategory::PaymentAuthentication,
+        trans_status: TransStatus::Success,
+        trans_status_reason: None,
+        authentication_method: Some(AcsAuthMethod::PushNotification),
+        authentication_type: Some(AuthenticationType::ChallengeOob),
+        authentication_value: Some("abc==".to_owned()),
+        eci: Some(Eci::VisaFullyAuthenticated),
+        interaction_counter: Some("01".to_owned()),
+        acs_rendering_type: None,
+        message_extension: None,
+    };
+
+    let rres = emv_3ds::message::ResultsResponse::acknowledge(&rreq);
+    assert_eq!(rres.three_ds_server_trans_id, "txn-001");
+    assert_eq!(rres.acs_trans_id, "acs-001");
+    assert_eq!(rres.ds_trans_id.as_deref(), Some("ds-001"));
+    assert_eq!(rres.results_status, ResultsStatus::Received);
+
+    let json = serde_json::to_string(&rres).unwrap();
+    assert!(json.contains("\"messageType\":\"RRes\""));
+    assert!(json.contains("\"resultsStatus\":\"01\""));
+
+    let decoded: emv_3ds::message::ResultsResponse = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded.results_status, ResultsStatus::Received);
 }
