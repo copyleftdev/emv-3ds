@@ -1,5 +1,7 @@
 # emv-3ds
 
+[![Tip my tokens](https://tokentip.to/badge/copyleftdev.svg?logo=1)](https://tokentip.to/@copyleftdev)
+
 **EMV 3-D Secure 2.x protocol implementation in Rust.**
 
 A zero-dependency\* Rust crate providing the complete message layer and transaction
